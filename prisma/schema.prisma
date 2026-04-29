@@ -1,0 +1,968 @@
+// The Solar Maintenance Guys — CRM & Sales Platform
+// Phase 1A (foundation) + Phase 1B (Jobs, Estimates, Commissions, Profit Snapshots).
+//
+// Conventions:
+//  - All timestamps stored in UTC (DateTime), displayed timezone-aware in the UI.
+//  - JSON fields used for flexible/evolving structures (pricing, permissions, settings, status history).
+//  - Soft deletes on Company and Job via deleted_at.
+//  - Audit Log is append-only — never updated or deleted.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // DATABASE_URL: pooled connection (transaction mode, port 6543) for runtime queries.
+  // DIRECT_URL: direct connection (port 5432) used only by `prisma migrate`.
+  // In local dev both can point at the same Postgres.app URL; in production set them
+  // separately to Supabase's pooler URL and direct URL respectively.
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+enum Role {
+  OWNER
+  LIMITED_ADMIN
+  SALES_REP
+  REGIONAL_MANAGER
+}
+
+enum CompanyStatus {
+  COLD
+  CONTACTED
+  INTERESTED
+  AGREED_TO_USE_US
+  FIRST_JOB_SENT
+  REPEAT_CUSTOMER
+  CLOSED_INACTIVE
+}
+
+enum DealFlowTier {
+  HIGH_VOLUME
+  MEDIUM_VOLUME
+  LOW_VOLUME
+  NEW_UNKNOWN
+}
+
+enum CompanySource {
+  CSV_IMPORT
+  MANUAL_ENTRY
+  INBOUND
+}
+
+enum DealType {
+  FLAT_RATE_PER_PANEL
+  PERCENTAGE_OF_INSURANCE_PAYOUT
+  CUSTOM
+}
+
+enum DealStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  PENDING_APPROVAL
+}
+
+enum AgreementType {
+  SERVICE_TERMS
+  VOLUME_COMMITMENT
+  EXCLUSIVITY
+  OTHER
+}
+
+enum AgreementStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+enum ActivityType {
+  CALL
+  EMAIL
+  TEXT
+  MEETING
+  NOTE
+  STATUS_CHANGE
+  COMPANY_INFO_UPDATE
+}
+
+enum ActivityDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum MeetingType {
+  IN_PERSON
+  PHONE
+  VIDEO
+}
+
+enum EmailDeliveryStatus {
+  SENT
+  DELIVERED
+  BOUNCED
+  OPENED
+  CLICKED
+  REPLIED
+}
+
+enum TextDeliveryStatus {
+  SENT
+  DELIVERED
+  FAILED
+}
+
+enum AuditActionType {
+  PRICE_OVERRIDE
+  COMMISSION_EDIT
+  COMMISSION_STRUCTURE_CHANGE
+  DEAL_CREATED
+  DEAL_MODIFIED
+  APPROVAL_DECISION
+  COMPANY_REASSIGNED
+  COMPANY_DELETED
+  ROLE_CHANGE
+  PERMISSION_CHANGE
+  COST_ENTRY
+  COST_EDIT
+  PROFIT_SNAPSHOT_LOCKED
+  DNC_FLAG_CHANGED
+  USER_INVITED
+  USER_DEACTIVATED
+  GLOBAL_SETTING_CHANGED
+  CSV_IMPORT
+  JOB_CREATED
+  JOB_STATUS_CHANGED
+  JOB_CANCELLED
+  JOB_DELETED
+  ESTIMATE_CREATED
+  ESTIMATE_VERSIONED
+  ESTIMATE_SENT
+  COMMISSION_QUARTER_OVERRIDE
+}
+
+enum AuditEntityType {
+  COMPANY
+  JOB
+  DEAL
+  USER
+  ESTIMATE
+  CONTACT
+  AGREEMENT
+  GLOBAL_SETTING
+  CSV_IMPORT
+}
+
+enum NotificationType {
+  FOLLOW_UP_DUE
+  APPROVAL_NEEDED
+  COMPANY_REASSIGNED
+  REP_INACTIVE
+  GOAL_ALERT
+  DORMANT_COMPANY
+  CAMPAIGN_REPLY
+  COMMISSION_UPDATE
+  BACKWARD_STATUS_CHANGE
+  CUSTOM
+}
+
+// ----------------------------------------------------------------------------
+// Phase 1B — Jobs, Estimates, Commissions
+// ----------------------------------------------------------------------------
+
+enum JobStatus {
+  ESTIMATE_SENT
+  APPROVED
+  SCHEDULED
+  DETACH_COMPLETE
+  REINSTALL_COMPLETE
+  INVOICED
+  PAID
+  CANCELLED
+}
+
+enum JobType {
+  DETACH_AND_REINSTALL
+  DETACH_ONLY
+  DIRECT_CUSTOMER
+}
+
+enum ApprovalStatus {
+  NOT_REQUIRED
+  PENDING
+  APPROVED
+  DENIED
+}
+
+enum CommissionStatus {
+  PENDING
+  ELIGIBLE
+  PAID
+  CANCELLED
+}
+
+enum EstimateType {
+  INSURANCE_RETAIL
+  SUBCONTRACTOR
+}
+
+enum EstimateSentTo {
+  ROOFING_COMPANY
+  INSURANCE_COMPANY
+}
+
+// ----------------------------------------------------------------------------
+// User (internal team)
+// ----------------------------------------------------------------------------
+
+model User {
+  id        String  @id @default(cuid())
+  firstName String
+  lastName  String
+  email     String  @unique
+  phone     String?
+  role      Role    @default(SALES_REP)
+
+  // Granular permission flags for LIMITED_ADMIN role. Empty for OWNER (full access) and SALES_REP.
+  permissions Json @default("{}")
+
+  // Commission structure snapshot. Currently all reps use quarterly revenue tiers,
+  // but JSON keeps this flexible for future per-rep customization.
+  commissionStructure Json @default("{\"type\":\"quarterly_revenue_tiers\",\"base_rate\":0.10,\"tiers\":[{\"min\":250000,\"max\":374999,\"rate\":0.12},{\"min\":375000,\"max\":499999,\"rate\":0.13},{\"min\":500000,\"max\":null,\"rate\":0.14}]}")
+
+  // Per-rep outreach goals (editable by owner). Applies to SALES_REP users.
+  outreachTargets Json @default("{\"daily_calls\":30,\"daily_emails\":20,\"daily_texts\":15}")
+
+  // Dedicated business phone number assigned via Twilio, e.g. "+15125551234". Null until provisioned.
+  twilioPhoneNumber String? @unique
+
+  // Auth fields
+  hashedPassword String? // null when user has not set a password yet (pending magic-link invitation)
+  emailVerified  DateTime?
+  image          String?
+
+  isActive Boolean @default(true)
+  regionId String? // for future regional expansion
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // NextAuth relations
+  accounts Account[]
+  sessions Session[]
+
+  // Domain relations
+  assignedCompanies    Company[]    @relation("CompanyAssignedRep")
+  createdCompanies     Company[]    @relation("CompanyCreatedBy")
+  negotiatedDeals      Deal[]       @relation("DealNegotiatedBy")
+  approvedDeals        Deal[]       @relation("DealApprovedBy")
+  loggedActivities     Activity[]   @relation("ActivityRep")
+  createdAgreements    Agreement[]
+  notifications        Notification[]
+  auditLogs            AuditLog[]
+  sentInvitations      Invitation[] @relation("InvitationCreatedBy")
+  csvImports           CsvImport[]
+  assignedJobs         Job[]        @relation("JobAssignedRep")
+  approvedJobs         Job[]        @relation("JobApprovedBy")
+  dashboardLayouts     DashboardLayout[]
+  notificationPrefs    NotificationPreference?
+  createdCampaigns     EmailCampaign[]
+
+  @@index([role])
+  @@index([email])
+  @@index([isActive])
+}
+
+// ----------------------------------------------------------------------------
+// NextAuth models (Account, Session, VerificationToken)
+// ----------------------------------------------------------------------------
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// Invitation record: owner creates a user, an invitation token is emailed to them.
+model Invitation {
+  id              String   @id @default(cuid())
+  email           String
+  tokenHash       String   @unique
+  role            Role
+  createdByUserId String
+  acceptedAt      DateTime?
+  expiresAt       DateTime
+  createdAt       DateTime @default(now())
+
+  createdBy User @relation("InvitationCreatedBy", fields: [createdByUserId], references: [id])
+
+  @@index([email])
+  @@index([expiresAt])
+}
+
+// ----------------------------------------------------------------------------
+// Company (Roofing Company)
+// ----------------------------------------------------------------------------
+
+model Company {
+  id           String        @id @default(cuid())
+  companyName  String
+  status       CompanyStatus @default(COLD)
+
+  // Contact info
+  phoneNumber String? // normalized digits-only on import
+  email       String?
+  website     String?
+
+  // Address
+  addressStreet String?
+  addressCity   String?
+  addressState  String?
+  addressZip    String?
+  latitude      Float?
+  longitude     Float?
+
+  // Scraped Google metadata
+  googleReviewCount Int?
+  googleRating      Float?
+  yearEstablished   Int?
+  employeeCount     Int?
+
+  // Classification
+  dealFlowTier DealFlowTier @default(NEW_UNKNOWN)
+  territory    String?
+
+  // Assignment
+  assignedRepId   String?
+  assignedRep     User?   @relation("CompanyAssignedRep", fields: [assignedRepId], references: [id])
+  createdByUserId String?
+  createdBy       User?   @relation("CompanyCreatedBy", fields: [createdByUserId], references: [id])
+
+  // Next Action — drives the rep's daily task list
+  nextActionType String?
+  nextActionDate DateTime?
+
+  // Key date stamps
+  dateFirstContacted DateTime?
+  dateLastContacted  DateTime?
+  dateLastProject    DateTime?
+
+  source CompanySource @default(MANUAL_ENTRY)
+
+  // Do Not Contact flags
+  doNotCall  Boolean @default(false)
+  doNotEmail Boolean @default(false)
+  doNotText  Boolean @default(false)
+
+  // General notes
+  notes String? @db.Text
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // soft delete
+
+  // Relations
+  contacts    Contact[]
+  deals       Deal[]
+  agreements  Agreement[]
+  activities  Activity[]
+  jobs        Job[]
+  campaignTracking CampaignRecipientTracking[]
+
+  @@index([companyName])
+  @@index([status])
+  @@index([assignedRepId])
+  @@index([addressCity])
+  @@index([addressState])
+  @@index([addressZip])
+  @@index([dateLastContacted])
+  @@index([dateLastProject])
+  @@index([nextActionDate])
+  @@index([googleReviewCount])
+  @@index([doNotCall])
+  @@index([doNotEmail])
+  @@index([doNotText])
+  @@index([deletedAt])
+  @@index([phoneNumber])
+  @@index([email])
+}
+
+// ----------------------------------------------------------------------------
+// Contact (person at a roofing company)
+// ----------------------------------------------------------------------------
+
+model Contact {
+  id        String  @id @default(cuid())
+  companyId String
+  firstName String
+  lastName  String?
+  roleTitle String? // job title / role
+  phoneNumber String?
+  email       String?
+  isPrimaryContact Boolean @default(false)
+
+  doNotCall  Boolean @default(false)
+  doNotEmail Boolean @default(false)
+  doNotText  Boolean @default(false)
+  unsubscribedAt DateTime?
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company    Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  activities Activity[]
+  jobs       Job[]      @relation("JobContact")
+  campaignTracking CampaignRecipientTracking[]
+  unsubscribeToken UnsubscribeToken?
+
+  @@index([companyId])
+  @@index([email])
+  @@index([phoneNumber])
+  @@index([isPrimaryContact])
+}
+
+// ----------------------------------------------------------------------------
+// Deal (standing pricing agreement)
+// ----------------------------------------------------------------------------
+
+model Deal {
+  id                 String     @id @default(cuid())
+  companyId          String
+  negotiatedByRepId  String?
+  dealType           DealType
+  pricingDetails     Json       // flexible structure — see Section 5.3 of the spec
+  status             DealStatus @default(ACTIVE)
+  effectiveDate      DateTime
+  expirationDate     DateTime?
+  termsNotes         String?    @db.Text
+  approvedByUserId   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company        Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  negotiatedBy   User?   @relation("DealNegotiatedBy", fields: [negotiatedByRepId], references: [id])
+  approvedBy     User?   @relation("DealApprovedBy", fields: [approvedByUserId], references: [id])
+  jobs           Job[]
+
+  @@index([companyId])
+  @@index([status])
+  @@index([effectiveDate])
+  @@index([expirationDate])
+}
+
+// ----------------------------------------------------------------------------
+// Agreement (non-pricing terms)
+// ----------------------------------------------------------------------------
+
+model Agreement {
+  id             String          @id @default(cuid())
+  companyId      String
+  repId          String?
+  agreementType  AgreementType
+  description    String
+  termsSummary   String?         @db.Text
+  effectiveDate  DateTime
+  expirationDate DateTime?
+  status         AgreementStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  rep     User?   @relation(fields: [repId], references: [id])
+
+  @@index([companyId])
+  @@index([status])
+}
+
+// ----------------------------------------------------------------------------
+// Activity (timeline log for a company/contact)
+// ----------------------------------------------------------------------------
+
+model Activity {
+  id           String            @id @default(cuid())
+  companyId    String
+  contactId    String?
+  repId        String?
+  activityType ActivityType
+  direction    ActivityDirection?
+
+  subject      String?
+  detailedNotes String? @db.Text
+
+  callRecordingUrl      String?
+  callDurationSeconds   Int?
+  callConnected         Boolean? // true if connected 30+s OR voicemail left
+  countsAsActivity      Boolean  @default(true)
+
+  meetingDate    DateTime?
+  meetingType    MeetingType?
+  meetingOutcome String?       @db.Text
+
+  emailCampaignId     String?
+  emailDeliveryStatus EmailDeliveryStatus?
+  textDeliveryStatus  TextDeliveryStatus?
+
+  createdAt DateTime @default(now())
+
+  company Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact Contact? @relation(fields: [contactId], references: [id])
+  rep     User?    @relation("ActivityRep", fields: [repId], references: [id])
+
+  @@index([companyId])
+  @@index([contactId])
+  @@index([repId])
+  @@index([activityType])
+  @@index([createdAt])
+}
+
+// ----------------------------------------------------------------------------
+// Job (specific project)
+// ----------------------------------------------------------------------------
+
+model Job {
+  id               String    @id @default(cuid())
+  companyId        String
+  dealId           String?   // null when custom-quoted with no standing deal
+  contactId        String?   // the person who referred/sent the job
+  assignedRepId    String?
+
+  jobAddressStreet String?
+  jobAddressCity   String?
+  jobAddressState  String?
+  jobAddressZip    String?
+
+  status        JobStatus @default(ESTIMATE_SENT)
+  statusHistory Json      @default("[]") // array of { status, changed_at, changed_by }
+
+  jobType     JobType @default(DETACH_AND_REINSTALL)
+  panelCount  Int?
+  pricePerPanel Decimal? @db.Decimal(12, 2)
+
+  insuranceEstimateTotal    Decimal? @db.Decimal(12, 2) // admin-only visibility enforced in app layer
+  subcontractorEstimateTotal Decimal? @db.Decimal(12, 2)
+
+  actualCost              Decimal? @db.Decimal(12, 2) // admin-only — entered after completion
+  profitSnapshot          Decimal? @db.Decimal(12, 2) // admin-only — frozen (subTotal - actualCost)
+  profitSnapshotDate      DateTime?
+  revisedMarginNote       String?  @db.Text
+
+  // Commission (revenue-based, not profit-based)
+  repCommission     Decimal?         @db.Decimal(12, 2)
+  commissionLocked  Boolean          @default(false)
+  commissionStatus  CommissionStatus @default(PENDING)
+  commissionQuarter String?          // e.g. "2026-Q2"
+
+  requiresApproval Boolean        @default(false)
+  approvalStatus   ApprovalStatus @default(NOT_REQUIRED)
+  approvedByUserId String?
+  approvedAt       DateTime?
+
+  insuranceCompanyName       String?
+  insuranceCommunicationNotes String? @db.Text
+
+  dateEstimateSent      DateTime?
+  dateApproved          DateTime?
+  dateDetachScheduled   DateTime?
+  dateDetachCompleted   DateTime?
+  dateReinstallCompleted DateTime?
+  dateInvoiced          DateTime?
+  datePaid              DateTime?
+  cancellationReason    String?   @db.Text
+
+  notes String? @db.Text
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  company     Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  deal        Deal?      @relation(fields: [dealId], references: [id])
+  contact     Contact?   @relation("JobContact", fields: [contactId], references: [id])
+  assignedRep User?      @relation("JobAssignedRep", fields: [assignedRepId], references: [id])
+  approvedBy  User?      @relation("JobApprovedBy", fields: [approvedByUserId], references: [id])
+  estimates   Estimate[]
+
+  @@index([companyId])
+  @@index([assignedRepId])
+  @@index([status])
+  @@index([approvalStatus])
+  @@index([commissionStatus])
+  @@index([commissionQuarter])
+  @@index([datePaid])
+  @@index([deletedAt])
+}
+
+// ----------------------------------------------------------------------------
+// Estimate (two per job: Insurance Retail + Subcontractor, each with versions)
+// ----------------------------------------------------------------------------
+
+model Estimate {
+  id              String         @id @default(cuid())
+  jobId           String
+  estimateType    EstimateType
+  versionNumber   Int            @default(1)
+  isCurrentVersion Boolean       @default(true)
+  totalAmount     Decimal        @default(0) @db.Decimal(12, 2)
+  pdfFilePath     String?
+  sentTo          EstimateSentTo?
+  dateSent        DateTime?
+  notes           String?        @db.Text
+  createdAt       DateTime       @default(now())
+
+  job       Job                 @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  lineItems EstimateLineItem[]
+
+  @@unique([jobId, estimateType, versionNumber])
+  @@index([jobId])
+  @@index([estimateType])
+  @@index([isCurrentVersion])
+}
+
+model EstimateLineItem {
+  id          String  @id @default(cuid())
+  estimateId  String
+  itemName    String
+  description String?  @db.Text
+  quantity    Decimal  @default(1) @db.Decimal(12, 2)
+  unitPrice   Decimal  @db.Decimal(12, 2)
+  total       Decimal  @db.Decimal(12, 2) // quantity × unit_price (stored for speed)
+  isCustom    Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  estimate Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+
+  @@index([estimateId])
+}
+
+// ----------------------------------------------------------------------------
+// Standard Line Item Menu (seed data)
+// ----------------------------------------------------------------------------
+
+model LineItemMenu {
+  id               String   @id @default(cuid())
+  itemName         String   @unique
+  defaultUnitPrice Decimal  @db.Decimal(12, 2)
+  unitType         String   // per panel, per hour, flat fee, per unit, etc.
+  description      String?  @db.Text
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// ----------------------------------------------------------------------------
+// Notification (in-app)
+// ----------------------------------------------------------------------------
+
+model Notification {
+  id               String           @id @default(cuid())
+  userId           String
+  notificationType NotificationType
+  title            String
+  message          String           @db.Text
+  relatedEntityType String?
+  relatedEntityId   String?
+  isRead            Boolean          @default(false)
+  createdAt         DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+}
+
+// ----------------------------------------------------------------------------
+// Audit Log (append-only)
+// ----------------------------------------------------------------------------
+
+model AuditLog {
+  id         String          @id @default(cuid())
+  userId     String?
+  actionType AuditActionType
+  entityType AuditEntityType
+  entityId   String?
+  oldValue   Json?
+  newValue   Json?
+  reason     String?         @db.Text
+  createdAt  DateTime        @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([actionType])
+  @@index([createdAt])
+}
+
+// ----------------------------------------------------------------------------
+// Global Settings (key/value)
+// ----------------------------------------------------------------------------
+
+model GlobalSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+}
+
+// ----------------------------------------------------------------------------
+// Phase 1D — Dashboards, Notification prefs, Notification scan dedupe
+// ----------------------------------------------------------------------------
+
+// Per-user saveable widget-grid layouts. `layout` is the react-grid-layout
+// array, `widgets` is the list of { id, type, props } entries.
+model DashboardLayout {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String   @default("Default")
+  isDefault Boolean  @default(true)
+  layout    Json     // [{ i, x, y, w, h, minW?, minH? }, ...]
+  widgets   Json     // [{ id, type, props }, ...]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isDefault])
+}
+
+// Toggleable email-summary preferences (UI + persistence; SendGrid send arrives in 1C).
+model NotificationPreference {
+  userId String @id
+  // Each content type toggle: off | daily | weekly
+  repActivity          String @default("weekly")   // off | daily | weekly
+  dealUpdates          String @default("daily")
+  campaignStats        String @default("weekly")
+  followUpReminders    String @default("daily")
+  commissionUpdates    String @default("daily")
+  approvalRequests     String @default("daily")
+  dormantCompanies     String @default("weekly")
+  // In-app toggle (notifications always work; this controls noise)
+  inAppAll             Boolean @default(true)
+  updatedAt            DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Dedupe rail for notification scans — prevents re-firing the same follow-up every hour.
+model NotificationScanToken {
+  id         String   @id @default(cuid())
+  kind       String   // "dormant", "followup_due", "high_value", "rep_inactive"
+  subjectId  String   // company_id / rep_id depending on kind
+  firedAt    DateTime @default(now())
+
+  @@unique([kind, subjectId])
+  @@index([kind, firedAt])
+}
+
+// ----------------------------------------------------------------------------
+// CSV Import history
+// ----------------------------------------------------------------------------
+
+model CsvImport {
+  id                   String   @id @default(cuid())
+  filename             String
+  importedByUserId     String
+  rowsTotal            Int
+  rowsImported         Int      @default(0)
+  rowsSkipped          Int      @default(0)
+  duplicatesFound      Int      @default(0)
+  fieldMapping         Json     // map of CSV column → system field
+  status               CsvImportStatus @default(STAGED)
+  createdAt            DateTime @default(now())
+  finalizedAt          DateTime?
+
+  importedBy User @relation(fields: [importedByUserId], references: [id])
+  rows       CsvImportStagingRow[]
+
+  @@index([importedByUserId])
+  @@index([createdAt])
+}
+
+enum CsvImportStatus {
+  STAGED // parsed + mapped, awaiting user review/finalize
+  FINALIZED
+  CANCELLED
+}
+
+enum CsvImportRowAction {
+  IMPORT_NEW
+  MERGE_WITH_EXISTING
+  SKIP
+}
+
+model CsvImportStagingRow {
+  id             String             @id @default(cuid())
+  importId       String
+  rowIndex       Int                // 0-based index in original CSV
+  mappedData     Json               // mapped company fields
+  rawData        Json               // original row (for reference)
+  isDuplicate    Boolean            @default(false)
+  matchReason    String?            // "phone", "email", "exact_name"
+  matchCompanyId String?            // existing company this row matches
+  action         CsvImportRowAction @default(IMPORT_NEW)
+
+  import CsvImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([importId])
+  @@index([isDuplicate])
+}
+
+// ----------------------------------------------------------------------------
+// Phase 1C — Email Campaigns (spec §5.11 – §5.13)
+// ----------------------------------------------------------------------------
+
+enum CampaignType {
+  COLD_OUTREACH
+  DRIP
+  ONBOARDING
+  RE_ENGAGEMENT
+  CUSTOM
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+enum CampaignFollowUpCondition {
+  NO_OPEN
+  NO_REPLY
+  NO_CLICK
+}
+
+enum CampaignRecipientStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  OPENED
+  CLICKED
+  REPLIED
+  BOUNCED
+  UNSUBSCRIBED
+  FAILED
+}
+
+model EmailCampaign {
+  id              String         @id @default(cuid())
+  name            String
+  type            CampaignType   @default(COLD_OUTREACH)
+  status          CampaignStatus @default(DRAFT)
+  // Target filter criteria (company status, tier, location, etc.) or explicit list.
+  targetFilter    Json           @default("{}")
+  createdByUserId String
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  createdBy User                        @relation(fields: [createdByUserId], references: [id])
+  emails    CampaignEmail[]
+  recipients CampaignRecipientTracking[]
+
+  @@index([status])
+  @@index([createdByUserId])
+}
+
+model CampaignEmail {
+  id                  String                     @id @default(cuid())
+  campaignId          String
+  sequenceOrder       Int                        // 1, 2, 3...
+  subjectLine         String
+  bodyTemplate        String                     @db.Text // supports {{merge_fields}}
+  delayDays           Int                        @default(0) // days after previous email / trigger
+  autoFollowUp        Boolean                    @default(false)
+  followUpCondition   CampaignFollowUpCondition?
+
+  campaign EmailCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  tracking CampaignRecipientTracking[]
+
+  @@unique([campaignId, sequenceOrder])
+  @@index([campaignId])
+}
+
+model CampaignRecipientTracking {
+  id              String                  @id @default(cuid())
+  campaignId      String
+  campaignEmailId String
+  companyId       String
+  contactId       String
+  status          CampaignRecipientStatus @default(QUEUED)
+  sendAfter       DateTime                @default(now()) // earliest time to send
+  sentAt          DateTime?
+  deliveredAt     DateTime?
+  openedAt        DateTime?
+  clickedAt       DateTime?
+  repliedAt       DateTime?
+  bouncedAt       DateTime?
+  unsubscribedAt  DateTime?
+  sendgridMessageId String?               // for correlation with webhook events
+
+  campaign      EmailCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaignEmail CampaignEmail @relation(fields: [campaignEmailId], references: [id], onDelete: Cascade)
+  company       Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  contact       Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignEmailId, contactId])
+  @@index([campaignId])
+  @@index([status, sendAfter])
+  @@index([sendgridMessageId])
+  @@index([companyId])
+  @@index([contactId])
+}
+
+// ----------------------------------------------------------------------------
+// Phase 1C — Twilio call / SMS logging supplement
+// ----------------------------------------------------------------------------
+
+// Persists Twilio-side identifiers on Activity entries so we can correlate
+// webhook events (status/recording/sms delivery) with already-created rows.
+// We reuse the Activity table; this is just a Prisma-visible extension.
+
+// Phase 1C — Unsubscribe token for public links (spec §7).
+model UnsubscribeToken {
+  token      String   @id // random string included in mail footer
+  contactId  String   @unique
+  createdAt  DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+}
