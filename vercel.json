@@ -3,6 +3,7 @@
   "crons": [
     {
       "path": "/api/campaigns/tick",
+      "//": "Every 15 minutes — drains queued campaign recipients up to daily_campaign_sending_limit. Requires Vercel Pro.",
       "schedule": "*/15 * * * *"
     }
   ]

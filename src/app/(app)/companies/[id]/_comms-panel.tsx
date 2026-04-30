@@ -66,10 +66,10 @@ export function CommsButtons({
   return (
     <>
       <form
-        action={(fd) => {
+        action={async (fd) => {
           fd.set("companyId", companyId);
           if (primaryContact) fd.set("contactId", primaryContact.id);
-          handle("call", fd);
+          await handle("call", fd);
         }}
       >
         <Button variant="outline" size="sm" type="submit" disabled={!!callReason || pending} title={callReason ?? "Call"}>
@@ -91,10 +91,10 @@ export function CommsButtons({
       {open === "sms" ? (
         <Modal title="Send text message" onClose={() => setOpen(null)} error={err}>
           <form
-            action={(fd) => {
+            action={async (fd) => {
               fd.set("companyId", companyId);
               if (primaryContact) fd.set("contactId", primaryContact.id);
-              handle("sms", fd);
+              await handle("sms", fd);
             }}
             className="space-y-3"
           >
@@ -113,9 +113,9 @@ export function CommsButtons({
       {open === "email" ? (
         <Modal title="Send email" onClose={() => setOpen(null)} error={err}>
           <form
-            action={(fd) => {
+            action={async (fd) => {
               fd.set("companyId", companyId);
-              handle("email", fd);
+              await handle("email", fd);
             }}
             className="space-y-3"
           >
