@@ -6,7 +6,9 @@ import { randomBytes, createHash } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { requireRole } from "@/auth";
 import { recordAudit } from "@/lib/audit";
-import type { Role } from "@prisma/client";
+import { parseStructure, type CommissionStructure } from "@/lib/commission";
+import { recomputeAllJobCommissionsForRep } from "@/app/(app)/jobs/actions";
+import type { Prisma, Role } from "@prisma/client";
 
 const inviteSchema = z.object({
   firstName: z.string().min(1),
@@ -128,4 +130,81 @@ export async function acceptInvitation(formData: FormData) {
     where: { tokenHash },
     data: { acceptedAt: new Date() },
   });
+}
+
+// ----------------------------------------------------------------------------
+// Commission structure editing (owner only)
+// ----------------------------------------------------------------------------
+
+const commissionSchema = z.object({
+  id: z.string().min(1),
+  type: z.enum(["flat_revenue", "flat_profit", "quarterly_revenue_tiers"]),
+  // Flat structures: a single rate (percent, 0–100)
+  ratePercent: z.coerce.number().min(0).max(100).optional(),
+  // Tiers structure: base rate + serialized JSON tiers
+  basePercent: z.coerce.number().min(0).max(100).optional(),
+  tiersJson: z.string().optional(),
+});
+
+export async function updateUserCommission(formData: FormData) {
+  const session = await requireRole(["OWNER"]);
+  const parsed = commissionSchema.safeParse(Object.fromEntries(formData.entries()));
+  if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? "Invalid input");
+  const { id, type } = parsed.data;
+
+  const existing = await prisma.user.findUnique({ where: { id } });
+  if (!existing) throw new Error("User not found");
+  const oldStructure = parseStructure(existing.commissionStructure);
+
+  let newStructure: CommissionStructure;
+  if (type === "flat_revenue" || type === "flat_profit") {
+    if (parsed.data.ratePercent == null) throw new Error("Rate is required");
+    newStructure = { type, rate: parsed.data.ratePercent / 100 };
+  } else {
+    // quarterly_revenue_tiers
+    if (parsed.data.basePercent == null) throw new Error("Base rate is required");
+    let tiers: { min: number; max: number | null; rate: number }[] = [];
+    if (parsed.data.tiersJson) {
+      try {
+        const raw = JSON.parse(parsed.data.tiersJson) as Array<{
+          min: number | string;
+          max: number | string | null;
+          rate: number | string;
+        }>;
+        tiers = raw.map((t) => ({
+          min: Number(t.min) || 0,
+          max: t.max === null || t.max === undefined || t.max === "" ? null : Number(t.max),
+          rate: typeof t.rate === "number" ? t.rate : Number(t.rate) / 100,
+        }));
+      } catch {
+        throw new Error("Tiers JSON is malformed");
+      }
+    }
+    newStructure = {
+      type: "quarterly_revenue_tiers",
+      base_rate: parsed.data.basePercent / 100,
+      tiers,
+    };
+  }
+
+  await prisma.user.update({
+    where: { id },
+    data: { commissionStructure: newStructure as unknown as Prisma.InputJsonValue },
+  });
+
+  await recordAudit({
+    userId: session.user.id,
+    actionType: "COMMISSION_STRUCTURE_CHANGE",
+    entityType: "USER",
+    entityId: id,
+    oldValue: oldStructure,
+    newValue: newStructure,
+  });
+
+  // Recompute unlocked job commissions for this rep so existing jobs reflect the new rate.
+  // (Locked / Paid jobs are preserved per spec §8.)
+  await recomputeAllJobCommissionsForRep(id);
+
+  revalidatePath("/users");
+  revalidatePath(`/commission`);
 }

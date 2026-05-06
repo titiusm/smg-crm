@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { Card, CardBody, CardHeader, CardTitle, Badge } from "@/components/ui/primitives";
 import { Button } from "@/components/ui/button";
 import { ROLE_LABELS } from "@/lib/rbac";
+import { describeStructure, parseStructure } from "@/lib/commission";
+import { CommissionEditor } from "./_commission-editor";
 import { format } from "date-fns";
 
 export default async function UsersPage() {
@@ -37,31 +39,47 @@ export default async function UsersPage() {
                 <th className="px-4 py-2">Email</th>
                 <th className="px-4 py-2">Role</th>
                 <th className="px-4 py-2">Status</th>
+                <th className="px-4 py-2">Commission</th>
                 <th className="px-4 py-2">Joined</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-(--color-border)">
-              {users.map((u) => (
-                <tr key={u.id}>
-                  <td className="px-4 py-2 font-medium">{u.firstName} {u.lastName}</td>
-                  <td className="px-4 py-2 text-xs">{u.email}</td>
-                  <td className="px-4 py-2"><Badge variant="muted">{ROLE_LABELS[u.role]}</Badge></td>
-                  <td className="px-4 py-2">
-                    {u.isActive ? (
-                      u.hashedPassword ? (
-                        <Badge variant="success">Active</Badge>
+              {users.map((u) => {
+                const structure = parseStructure(u.commissionStructure);
+                return (
+                  <tr key={u.id}>
+                    <td className="px-4 py-2 font-medium">{u.firstName} {u.lastName}</td>
+                    <td className="px-4 py-2 text-xs">{u.email}</td>
+                    <td className="px-4 py-2"><Badge variant="muted">{ROLE_LABELS[u.role]}</Badge></td>
+                    <td className="px-4 py-2">
+                      {u.isActive ? (
+                        u.hashedPassword ? (
+                          <Badge variant="success">Active</Badge>
+                        ) : (
+                          <Badge variant="warning">Pending invite</Badge>
+                        )
                       ) : (
-                        <Badge variant="warning">Pending invite</Badge>
-                      )
-                    ) : (
-                      <Badge variant="muted">Deactivated</Badge>
-                    )}
-                  </td>
-                  <td className="px-4 py-2 text-xs text-(--color-muted-foreground)">
-                    {format(u.createdAt, "MMM d, yyyy")}
-                  </td>
-                </tr>
-              ))}
+                        <Badge variant="muted">Deactivated</Badge>
+                      )}
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-(--color-muted-foreground) max-w-[180px] truncate" title={describeStructure(structure)}>
+                          {describeStructure(structure)}
+                        </span>
+                        <CommissionEditor
+                          userId={u.id}
+                          userName={`${u.firstName} ${u.lastName}`}
+                          current={structure}
+                        />
+                      </div>
+                    </td>
+                    <td className="px-4 py-2 text-xs text-(--color-muted-foreground)">
+                      {format(u.createdAt, "MMM d, yyyy")}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </CardBody>

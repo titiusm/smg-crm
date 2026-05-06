@@ -9,7 +9,7 @@ import { isBackwardMove, isUnusualBackwardMove, requiresApproval as needsApprova
 import {
   currentQuarterString,
   parseStructure,
-  tierRateFor,
+  computePerJobCommission,
 } from "@/lib/commission";
 import { isScopedToOwnCompanies, canSeeCosts } from "@/lib/rbac";
 import type {
@@ -327,6 +327,9 @@ export async function enterCosts(formData: FormData) {
     });
   }
 
+  // Recompute commission — important for flat_profit reps who only earn once costs are known.
+  await recomputeJobCommission(id);
+
   revalidatePath(`/jobs/${id}`);
 }
 
@@ -388,15 +391,27 @@ export async function recomputeJobCommission(jobId: string) {
   if (!job) return;
   if (job.commissionLocked || job.commissionStatus === "PAID" || job.commissionStatus === "CANCELLED") return;
 
-  const subTotal = Number(job.subcontractorEstimateTotal ?? 0);
   const structure = parseStructure(job.assignedRep?.commissionStructure ?? null);
-  const baseRate = structure.base_rate;
-  const amount = subTotal * baseRate;
+  const amount = computePerJobCommission(structure, {
+    subcontractorEstimateTotal: job.subcontractorEstimateTotal == null ? null : Number(job.subcontractorEstimateTotal),
+    profitSnapshot: job.profitSnapshot == null ? null : Number(job.profitSnapshot),
+  });
 
   await prisma.job.update({
     where: { id: jobId },
     data: { repCommission: amount },
   });
+}
+
+/** Recompute commissions on every unlocked job for a rep. Used after admin updates the structure. */
+export async function recomputeAllJobCommissionsForRep(userId: string) {
+  const jobs = await prisma.job.findMany({
+    where: { assignedRepId: userId, commissionLocked: false, deletedAt: null },
+    select: { id: true },
+  });
+  for (const j of jobs) {
+    await recomputeJobCommission(j.id);
+  }
 }
 
 async function notifyOwners(

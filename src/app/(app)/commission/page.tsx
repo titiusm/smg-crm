@@ -6,9 +6,9 @@ import { Button } from "@/components/ui/button";
 import {
   computeQuarterlyCommission,
   currentQuarterString,
+  describeStructure,
   formatQuarter,
   parseStructure,
-  DEFAULT_STRUCTURE,
 } from "@/lib/commission";
 
 export default async function CommissionPage({
@@ -44,10 +44,29 @@ export default async function CommissionPage({
     (acc, j) => acc + Number(j.subcontractorEstimateTotal ?? 0),
     0
   );
-  const structure = parseStructure(user.commissionStructure) ?? DEFAULT_STRUCTURE;
-  const { baseCommission, bonus, totalCommission, effectiveRate } = computeQuarterlyCommission(revenue, structure);
+  const profit = jobsThisQuarter.reduce(
+    (acc, j) => acc + Number(j.profitSnapshot ?? 0),
+    0
+  );
+  const sumPerJobCommissions = jobsThisQuarter.reduce(
+    (acc, j) => acc + Number(j.repCommission ?? 0),
+    0
+  );
+  const structure = parseStructure(user.commissionStructure);
+  const { baseCommission, bonus, totalCommission, effectiveRate } =
+    computeQuarterlyCommission(revenue, structure);
 
   const quarters = generateRecentQuarters(6);
+
+  // Per-structure derived stats for the header strip:
+  const flatRate =
+    structure.type === "flat_revenue" || structure.type === "flat_profit"
+      ? structure.rate
+      : null;
+  const jobsMissingProfitSnapshot =
+    structure.type === "flat_profit"
+      ? jobsThisQuarter.filter((j) => j.profitSnapshot == null).length
+      : 0;
 
   return (
     <div className="space-y-6">
@@ -81,18 +100,62 @@ export default async function CommissionPage({
         </form>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-4">
-        <Stat label={`${formatQuarter(quarter)} revenue`} value={`$${revenue.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
-        <Stat label="Tier rate" value={`${(effectiveRate * 100).toFixed(0)}%`} accent="accent" />
-        <Stat label="Base (10%)" value={`$${baseCommission.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
-        <Stat label="Bonus adjustment" value={`${bonus >= 0 ? "+" : "-"}$${Math.abs(bonus).toLocaleString(undefined, { maximumFractionDigits: 0 })}`} accent={bonus > 0 ? "accent" : "muted"} />
-        <Stat
-          label="Total commission"
-          value={`$${totalCommission.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-          accent="accent"
-          className="md:col-span-4"
-        />
-      </div>
+      <Card>
+        <CardBody className="text-sm flex items-center justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-wide text-(--color-muted-foreground)">Structure</div>
+            <div className="font-medium">{describeStructure(structure)}</div>
+          </div>
+        </CardBody>
+      </Card>
+
+      {structure.type === "quarterly_revenue_tiers" ? (
+        <div className="grid gap-4 md:grid-cols-4">
+          <Stat label={`${formatQuarter(quarter)} revenue`} value={`$${revenue.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
+          <Stat label="Effective tier rate" value={`${(effectiveRate * 100).toFixed(0)}%`} accent="accent" />
+          <Stat label={`Base (${(structure.base_rate * 100).toFixed(0)}%)`} value={`$${baseCommission.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
+          <Stat
+            label="Bonus adjustment"
+            value={`${bonus >= 0 ? "+" : "-"}$${Math.abs(bonus).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+            accent={bonus > 0 ? "accent" : "muted"}
+          />
+          <Stat
+            label="Total commission"
+            value={`$${totalCommission.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+            accent="accent"
+            className="md:col-span-4"
+          />
+        </div>
+      ) : structure.type === "flat_revenue" ? (
+        <div className="grid gap-4 md:grid-cols-3">
+          <Stat label={`${formatQuarter(quarter)} revenue`} value={`$${revenue.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
+          <Stat label="Rate" value={`${((flatRate ?? 0) * 100).toFixed(1)}%`} accent="accent" />
+          <Stat
+            label="Total commission"
+            value={`$${(revenue * (flatRate ?? 0)).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+            accent="accent"
+          />
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-4">
+          <Stat label={`${formatQuarter(quarter)} revenue`} value={`$${revenue.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
+          <Stat label="Profit (frozen snapshots)" value={`$${profit.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} />
+          <Stat label="Rate" value={`${((flatRate ?? 0) * 100).toFixed(1)}%`} accent="accent" />
+          <Stat
+            label="Total commission"
+            value={`$${sumPerJobCommissions.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+            accent="accent"
+          />
+          {jobsMissingProfitSnapshot > 0 ? (
+            <Stat
+              label="Pending cost entry"
+              value={`${jobsMissingProfitSnapshot} job${jobsMissingProfitSnapshot === 1 ? "" : "s"}`}
+              accent="muted"
+              className="md:col-span-4"
+            />
+          ) : null}
+        </div>
+      )}
 
       <Card>
         <CardHeader><CardTitle>Jobs counted this quarter</CardTitle></CardHeader>
