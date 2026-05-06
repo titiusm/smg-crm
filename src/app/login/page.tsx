@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth, signIn } from "@/auth";
 import { Button } from "@/components/ui/button";
@@ -6,11 +7,11 @@ import { Card, CardBody, Input, Label } from "@/components/ui/primitives";
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ callbackUrl?: string; error?: string }>;
+  searchParams: Promise<{ callbackUrl?: string; error?: string; reset?: string; accepted?: string }>;
 }) {
   const session = await auth();
   if (session?.user?.id) redirect("/dashboard");
-  const { callbackUrl, error } = await searchParams;
+  const { callbackUrl, error, reset, accepted } = await searchParams;
 
   async function handleLogin(formData: FormData) {
     "use server";
@@ -46,7 +47,18 @@ export default async function LoginPage({
             {error ? (
               <p className="text-xs text-(--color-danger)">Invalid email or password.</p>
             ) : null}
+            {reset ? (
+              <p className="text-xs text-(--color-success)">Password updated. Sign in with your new password.</p>
+            ) : null}
+            {accepted ? (
+              <p className="text-xs text-(--color-success)">Account ready. Sign in with the password you just set.</p>
+            ) : null}
             <Button type="submit" className="w-full">Sign in</Button>
+            <p className="text-center text-[11px] pt-1">
+              <Link href="/forgot-password" className="text-(--color-muted-foreground) hover:text-(--color-foreground)">
+                Forgot password?
+              </Link>
+            </p>
           </form>
           <p className="text-center text-[11px] text-(--color-muted-foreground)">
             Accounts are created by the Owner. Need access? Ask Titius.

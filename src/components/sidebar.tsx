@@ -85,6 +85,12 @@ export function Sidebar({ role, userName }: { role: Role; userName: string }) {
         <div className="mt-1 text-(--color-muted-foreground) text-[11px]">
           {role === "OWNER" ? "Owner" : role === "LIMITED_ADMIN" ? "Limited Admin" : role === "SALES_REP" ? "Sales Rep" : "Regional Manager"}
         </div>
+        <Link
+          href="/profile"
+          className="mt-2 inline-block text-[11px] text-(--color-muted-foreground) hover:text-(--color-accent)"
+        >
+          Profile &amp; password →
+        </Link>
       </div>
     </aside>
   );

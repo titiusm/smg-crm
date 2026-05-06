@@ -56,6 +56,43 @@ export async function composeEmailBody(opts: {
   return { html, text };
 }
 
+/**
+ * Transactional send (no marketing footer / unsubscribe link).
+ * Used for password resets — CAN-SPAM exempts user-requested transactional emails from the
+ * unsubscribe + physical-address requirements.
+ */
+export async function sendTransactionalEmail(opts: {
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+  categories?: string[];
+}): Promise<{ messageId: string } | { error: string }> {
+  if (!sendgridConfigured()) return { error: "SendGrid not configured (SENDGRID_API_KEY missing)." };
+  const from = fromDefaults();
+  if (!from.email) return { error: "SENDGRID_FROM_EMAIL not set." };
+
+  try {
+    const [resp] = await sgMail.send({
+      to: opts.to,
+      from,
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text ?? stripHtml(opts.html),
+      categories: opts.categories ?? ["transactional"],
+      trackingSettings: {
+        // Disable open + click tracking so security-sensitive links route cleanly.
+        openTracking: { enable: false },
+        clickTracking: { enable: false },
+      },
+    });
+    const messageId = resp.headers["x-message-id"] as string | undefined;
+    return { messageId: messageId ?? "" };
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+}
+
 export async function sendIndividualEmail(opts: {
   to: string;
   subject: string;

@@ -7,6 +7,8 @@ const PUBLIC_PATHS = [
   "/api/twilio",
   "/api/sendgrid",
   "/accept-invite",
+  "/forgot-password",
+  "/reset-password",
   "/unsubscribe",
   "/_next",
   "/favicon.ico",

@@ -272,6 +272,7 @@ model User {
   dashboardLayouts     DashboardLayout[]
   notificationPrefs    NotificationPreference?
   createdCampaigns     EmailCampaign[]
+  passwordResets       PasswordResetToken[] @relation("PasswordResets")
 
   @@index([role])
   @@index([email])
@@ -332,6 +333,22 @@ model Invitation {
   createdBy User @relation("InvitationCreatedBy", fields: [createdByUserId], references: [id])
 
   @@index([email])
+  @@index([expiresAt])
+}
+
+// Password reset request — user clicks "Forgot password?" → emailed a token-gated link.
+// Single-use, short-lived. We never reveal whether an email exists in the system.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation("PasswordResets", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
   @@index([expiresAt])
 }
 
