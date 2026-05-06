@@ -6,16 +6,19 @@ import { Button } from "@/components/ui/button";
 import { ROLE_LABELS } from "@/lib/rbac";
 import { describeStructure, parseStructure } from "@/lib/commission";
 import { CommissionEditor } from "./_commission-editor";
+import { InvitationControls } from "./_invitation-controls";
 import { format } from "date-fns";
 
 export default async function UsersPage() {
   await requireRole(["OWNER"]);
   const users = await prisma.user.findMany({ orderBy: { createdAt: "asc" } });
+  // Include expired invites too so the admin can resend them. Filter out accepted ones.
   const pendingInvites = await prisma.invitation.findMany({
-    where: { acceptedAt: null, expiresAt: { gt: new Date() } },
+    where: { acceptedAt: null },
     orderBy: { createdAt: "desc" },
     include: { createdBy: true },
   });
+  const now = new Date();
 
   return (
     <div className="space-y-6">
@@ -94,18 +97,28 @@ export default async function UsersPage() {
             </div>
           ) : (
             <ul className="divide-y divide-(--color-border) text-sm">
-              {pendingInvites.map((i) => (
-                <li key={i.id} className="flex items-center justify-between gap-2 px-5 py-3">
-                  <div>
-                    <div className="font-medium">{i.email}</div>
-                    <div className="text-[11px] text-(--color-muted-foreground)">
-                      {ROLE_LABELS[i.role]} · invited by {i.createdBy.firstName} {i.createdBy.lastName} ·
-                      expires {format(i.expiresAt, "MMM d, yyyy")}
+              {pendingInvites.map((i) => {
+                const expired = i.expiresAt <= now;
+                return (
+                  <li key={i.id} className="px-5 py-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="font-medium">{i.email}</div>
+                        <div className="text-[11px] text-(--color-muted-foreground)">
+                          {ROLE_LABELS[i.role]} · invited by {i.createdBy.firstName} {i.createdBy.lastName} ·
+                          {expired ? " expired" : " expires"} {format(i.expiresAt, "MMM d, yyyy")}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Badge variant={expired ? "danger" : "warning"}>
+                          {expired ? "Expired" : "Pending"}
+                        </Badge>
+                        <InvitationControls invitationId={i.id} email={i.email} />
+                      </div>
                     </div>
-                  </div>
-                  <Badge variant="warning">Pending</Badge>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </CardBody>
